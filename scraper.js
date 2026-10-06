@@ -47,7 +47,7 @@ class SuraScraper {
         this.page = this.context.pages()[0] || await this.context.newPage();
     }
 
-    async login(docType, username, password) {
+    async login(docType, username, password, mfaProvider) {
         console.log('Iniciando proceso de autenticación...');
         // Redirige a login.sura.com/sso si no hay sesión activa
         // domcontentloaded: el portal SPA puede no disparar 'load' por recursos externos colgados
@@ -75,7 +75,7 @@ class SuraScraper {
             await this.page.click('.ui-keyboard-accept >> visible=true');
 
             await this.page.click('#session-internet');
-            await this.handleMfa();
+            await this.handleMfa(mfaProvider);
             await this.page.waitForSelector('#dropdownMenuButton', { timeout: 30000 });
             console.log('Login exitoso.');
         } catch (error) {
@@ -83,7 +83,7 @@ class SuraScraper {
         }
     }
 
-    async handleMfa() {
+    async handleMfa(mfaProvider) {
         try {
             await this.page.waitForURL(isAppUrl, { timeout: 10000 });
             return;
@@ -91,13 +91,84 @@ class SuraScraper {
             // Sin redirección inmediata: se asume que se está solicitando MFA
         }
 
-        if (process.env.HEADLESS === 'true') {
-            throw new Error('Se requiere MFA. Ejecute con HEADLESS=false para ingresarlo manualmente.');
+        // Sin proveedor de código: comportamiento clásico (manual o error en headless)
+        if (!mfaProvider) {
+            if (process.env.HEADLESS === 'true') {
+                throw new Error('Se requiere MFA. Ejecute con HEADLESS=false para ingresarlo manualmente.');
+            }
+            console.log(`MFA requerido: ingrese el código en el navegador (tiempo máximo ${MFA_TIMEOUT / 1000}s).`);
+            console.log('Si aparece la opción "recordar este dispositivo", márquela.');
+            await this.page.waitForURL(isAppUrl, { timeout: MFA_TIMEOUT });
+            return;
         }
 
-        console.log(`MFA requerido: ingrese el código en el navegador (tiempo máximo ${MFA_TIMEOUT / 1000}s).`);
-        console.log('Si aparece la opción "recordar este dispositivo", márquela.');
-        await this.page.waitForURL(isAppUrl, { timeout: MFA_TIMEOUT });
+        // Flujo con front: se solicita el código al usuario y se espera (mín. 1 min) antes de aplicarlo
+        console.log('[MFA] Página de verificación detectada; pidiendo el código al usuario…');
+        const codigo = await mfaProvider();
+        console.log(`[MFA] Código recibido (${codigo.length} dígitos); ingresándolo en la página…`);
+        await this.ingresarCodigoMfa(codigo);
+        try {
+            await this.page.waitForURL(isAppUrl, { timeout: MFA_TIMEOUT });
+        } catch {
+            throw new Error('El código MFA fue rechazado o la sesión no avanzó tras ingresarlo.');
+        }
+        console.log('[MFA] Verificación aceptada.');
+    }
+
+    async ingresarCodigoMfa(codigo) {
+        // Pantallazo de diagnóstico (siempre en modo intento)
+        try {
+            await fs.mkdir(SCREENSHOT_DIR, { recursive: true });
+            await this.screenshot('mfa');
+        } catch (error) {
+            console.warn('[MFA] No se pudo guardar el pantallazo:', error.message);
+        }
+
+        // Buscar el campo del código: autocomplete one-time-code y variantes comunes
+        const candidatos = [
+            'input[autocomplete="one-time-code"]',
+            'input[type="tel"]',
+            'input[type="number"]',
+            'input[id*="otp" i], input[name*="otp" i]',
+            'input[id*="codigo" i], input[name*="codigo" i]',
+            'input[id*="code" i], input[name*="code" i]',
+            'input[type="password"]'
+        ];
+        let input = null;
+        for (const selector of candidatos) {
+            const l = this.page.locator(selector).locator('visible=true').first();
+            if (await l.count().catch(() => 0) && await l.isVisible().catch(() => false)) {
+                input = l;
+                break;
+            }
+        }
+        if (!input) throw new Error('No se encontró el campo del código MFA en la página.');
+        await input.click();
+
+        // Sura usa teclado virtual en la clave; si aparece aquí también, se usan los botones
+        const tecladoVirtual = await this.page.locator('.ui-keyboard').locator('visible=true').count().catch(() => 0);
+        if (tecladoVirtual) {
+            for (const digit of codigo) {
+                await this.page.click(`.ui-keyboard button[data-value="${digit}"] >> visible=true`);
+                await Utils.randomDelay(150, 400);
+            }
+            const aceptar = this.page.locator('.ui-keyboard-accept').locator('visible=true').first();
+            if (await aceptar.count().catch(() => 0)) await aceptar.click().catch(() => {});
+        } else {
+            await input.fill('');
+            await input.pressSequentially(codigo, { delay: 120 });
+        }
+
+        // Confirmar: botón con texto típico o Enter como respaldo
+        const boton = this.page
+            .locator('button:visible, input[type="submit"]:visible, a.btn:visible')
+            .filter({ hasText: /continuar|ingresar|verificar|validar|aceptar|enviar|accept|continue/i })
+            .first();
+        if (await boton.count().catch(() => 0)) {
+            await boton.click().catch(() => {});
+        } else {
+            await input.press('Enter').catch(() => {});
+        }
     }
 
     async goToNuevoAutos() {
@@ -383,14 +454,14 @@ class SuraScraper {
 
 module.exports = { SuraScraper };
 
-async function ejecutarCotizacion({ cedula, placa, tipoVehiculo, ciudad, ciudadCirculacion }) {
+async function ejecutarCotizacion({ cedula, placa, tipoVehiculo, ciudad, ciudadCirculacion }, mfaProvider) {
     const { SURA_DOC_TYPE = 'C', SURA_USER, SURA_PASS } = process.env;
     if (!SURA_USER || !SURA_PASS) throw new Error('Faltan SURA_USER y/o SURA_PASS en el archivo .env');
 
     const scraper = new SuraScraper();
     try {
         await scraper.init();
-        await scraper.login(SURA_DOC_TYPE, SURA_USER, SURA_PASS);
+        await scraper.login(SURA_DOC_TYPE, SURA_USER, SURA_PASS, mfaProvider);
         await scraper.goToNuevoAutos();
         await scraper.buscarPersona(cedula);
         await scraper.llenarDireccionResidencia(ciudad, ciudadCirculacion);

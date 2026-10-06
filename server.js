@@ -9,6 +9,11 @@ const HOST = process.env.HOST || '127.0.0.1';
 const API_KEY = process.env.API_KEY;
 const MAX_BODY = 10 * 1024;
 const MAKE_WEBHOOK_URL = process.env.MAKE_WEBHOOK_URL;
+// MFA manual: se espera al menos 1 min (tiempo de tomar el código en la app) antes de aplicarlo
+const MFA_MIN_WAIT_MS = Number(process.env.MFA_MIN_WAIT_MS) || 60 * 1000;
+const MFA_WAIT_TIMEOUT_MS = Number(process.env.MFA_WAIT_TIMEOUT_MS) || 10 * 60 * 1000;
+// Esperas de código MFA activas por id de cotización
+const mfaPendientes = new Map();
 
 // Las cotizaciones se ejecutan de a una (perfil persistente del navegador)
 let cola = Promise.resolve();
@@ -88,7 +93,9 @@ async function procesarCotizacion(id, datos, telefono) {
     trabajos.set(id, { id, estado: 'procesando' });
     try {
         console.log(`[API] ${id} iniciando: ${datos.cedula} / ${datos.placa}`);
-        const archivo = path.basename(await ejecutarCotizacion(datos));
+        const archivo = path.basename(
+            await ejecutarCotizacion(datos, () => esperarCodigoMfa(id))
+        );
         const resultado = {
             id, ok: true, telefono, cedula: datos.cedula, placa: datos.placa, archivo,
             descarga: `/pdf/${encodeURIComponent(archivo)}`,
@@ -104,6 +111,78 @@ async function procesarCotizacion(id, datos, telefono) {
     } finally {
         pendientes--;
     }
+}
+
+function esperarCodigoMfa(id) {
+    return new Promise((resolve, reject) => {
+        const inicio = Date.now();
+        let codigo = null;
+        let cerrado = false;
+        let timerMin = null;
+
+        const trabajo = trabajos.get(id) || { id };
+        trabajos.set(id, {
+            ...trabajo,
+            estado: 'esperando_mfa',
+            mfa: {
+                minEsperaSeg: Math.round(MFA_MIN_WAIT_MS / 1000),
+                limite: new Date(Date.now() + MFA_WAIT_TIMEOUT_MS).toISOString()
+            }
+        });
+        console.log(
+            `[API] ${id} requiere MFA: esperando código (mínimo ${MFA_MIN_WAIT_MS / 1000}s, máximo ${MFA_WAIT_TIMEOUT_MS / 60000} min)`
+        );
+
+        const cerrar = () => {
+            cerrado = true;
+            clearTimeout(timerMax);
+            if (timerMin) clearTimeout(timerMin);
+            mfaPendientes.delete(id);
+        };
+
+        const aplicar = () => {
+            if (cerrado || !codigo) return;
+            const transcurrido = Date.now() - inicio;
+            if (transcurrido < MFA_MIN_WAIT_MS) {
+                // Espera mínima: el usuario necesita al menos 1 min para tomar el código
+                if (!timerMin) timerMin = setTimeout(aplicar, MFA_MIN_WAIT_MS - transcurrido + 50);
+                return;
+            }
+            cerrar();
+            const { mfa, ...resto } = trabajos.get(id) || { id };
+            trabajos.set(id, { ...resto, estado: 'procesando' });
+            console.log(`[API] ${id} código MFA aplicado tras ${Math.round((Date.now() - inicio) / 1000)}s`);
+            resolve(codigo);
+        };
+
+        const timerMax = setTimeout(() => {
+            if (cerrado) return;
+            cerrar();
+            reject(new Error(`Tiempo agotado esperando el código MFA (${Math.round(MFA_WAIT_TIMEOUT_MS / 60000)} min)`));
+        }, MFA_WAIT_TIMEOUT_MS);
+
+        mfaPendientes.set(id, {
+            recibir: valor => {
+                codigo = valor;
+                aplicar();
+            }
+        });
+    });
+}
+
+async function recibirMfa(req, res, id) {
+    const body = await leerJson(req);
+    const codigo = String(body.codigo ?? '').replace(/\D/g, '');
+    if (!/^\d{4,10}$/.test(codigo)) {
+        return sendJson(res, 400, { ok: false, errores: ['codigo debe tener entre 4 y 10 dígitos'] });
+    }
+    const pendiente = mfaPendientes.get(id);
+    if (!pendiente) {
+        return sendJson(res, 404, { ok: false, error: 'No hay verificación MFA pendiente para esta cotización' });
+    }
+    pendiente.recibir(codigo);
+    const trabajo = trabajos.get(id);
+    return sendJson(res, 200, { ok: true, id, estado: trabajo?.estado ?? 'esperando_mfa' });
 }
 
 async function cotizar(req, res) {
@@ -161,6 +240,7 @@ const server = http.createServer(async (req, res) => {
         }
         if (!autorizado(req)) return sendJson(res, 401, { ok: false, error: 'No autorizado' });
         if (req.method === 'POST' && pathname === '/cotizar') return await cotizar(req, res);
+        if (req.method === 'POST' && pathname.startsWith('/mfa/')) return await recibirMfa(req, res, pathname.slice(5));
         if (req.method === 'GET' && pathname.startsWith('/pdf/')) return servirPdf(res, pathname.slice(5), searchParams.get('inline') === '1');
         if (req.method === 'GET' && pathname.startsWith('/estado/')) {
             const trabajo = trabajos.get(pathname.slice(8));
