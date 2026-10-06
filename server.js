@@ -137,17 +137,26 @@ const server = http.createServer(async (req, res) => {
     try {
         if (req.method === 'GET' && pathname === '/health') return sendJson(res, 200, { ok: true, pendientes });
         if (req.method === 'GET' && pathname === '/diag') {
-            // Diagnóstico temporal: conectividad del contenedor hacia el portal de Sura
+            // Diagnóstico temporal: conectividad + estado del perfil de navegador
+            const perfilDir = path.join(__dirname, '.auth', 'profile');
+            const cookies = path.join(perfilDir, 'Default', 'Cookies');
             const inicio = Date.now();
+            let infoPerfil;
+            try {
+                const st = fs.statSync(cookies);
+                infoPerfil = { existe: true, cookiesBytes: st.size, cookiesModificado: st.mtime.toISOString() };
+            } catch {
+                infoPerfil = { existe: fs.existsSync(perfilDir), cookiesBytes: 0 };
+            }
             try {
                 const r = await fetch('https://cotizadores.sura.com/#/Inicio', {
                     signal: AbortSignal.timeout(25000),
                     headers: { 'User-Agent': 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/140.0.0.0 Safari/537.36' }
                 });
-                const texto = (await r.text()).slice(0, 200);
-                return sendJson(res, 200, { ok: true, status: r.status, ms: Date.now() - inicio, snippet: texto });
+                const texto = (await r.text()).slice(0, 100);
+                return sendJson(res, 200, { ok: true, status: r.status, ms: Date.now() - inicio, perfil: infoPerfil, snippet: texto });
             } catch (error) {
-                return sendJson(res, 200, { ok: false, error: error.message, ms: Date.now() - inicio });
+                return sendJson(res, 200, { ok: false, error: error.message, ms: Date.now() - inicio, perfil: infoPerfil });
             }
         }
         if (!autorizado(req)) return sendJson(res, 401, { ok: false, error: 'No autorizado' });
