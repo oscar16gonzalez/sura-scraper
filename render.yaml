@@ -1,0 +1,29 @@
+services:
+  - type: web
+    name: sura-scraper
+    runtime: docker
+    plan: starter          # necesita plano con disco persistente (Starter+) para conservar el perfil del navegador
+    healthCheckPath: /health
+    disk:
+      name: sura-profile
+      mountPath: /app/.auth
+      sizeGB: 1
+    envVars:
+      - key: HOST
+        value: 0.0.0.0
+      - key: HEADLESS
+        value: "true"
+      # Render inyecta la variable PORT automáticamente
+      # Secretos: crearlos desde el dashboard de Render (Sync: false)
+      - key: SURA_USER
+        sync: false
+      - key: SURA_PASS
+        sync: false
+      - key: SURA_DOC_TYPE
+        sync: false
+      - key: API_KEY
+        sync: false
+      - key: MAKE_WEBHOOK_URL
+        sync: false
+      - key: PAUSA_COTIZADOR_MS
+        sync: false

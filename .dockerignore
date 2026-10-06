@@ -1,0 +1,7 @@
+node_modules
+.auth
+assets
+.env
+.env.example
+.DS_Store
+.git
