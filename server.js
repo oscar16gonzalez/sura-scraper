@@ -136,6 +136,20 @@ const server = http.createServer(async (req, res) => {
     const { pathname, searchParams } = new URL(req.url, `http://${req.headers.host || 'localhost'}`);
     try {
         if (req.method === 'GET' && pathname === '/health') return sendJson(res, 200, { ok: true, pendientes });
+        if (req.method === 'GET' && pathname === '/diag') {
+            // Diagnóstico temporal: conectividad del contenedor hacia el portal de Sura
+            const inicio = Date.now();
+            try {
+                const r = await fetch('https://cotizadores.sura.com/#/Inicio', {
+                    signal: AbortSignal.timeout(25000),
+                    headers: { 'User-Agent': 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/140.0.0.0 Safari/537.36' }
+                });
+                const texto = (await r.text()).slice(0, 200);
+                return sendJson(res, 200, { ok: true, status: r.status, ms: Date.now() - inicio, snippet: texto });
+            } catch (error) {
+                return sendJson(res, 200, { ok: false, error: error.message, ms: Date.now() - inicio });
+            }
+        }
         if (!autorizado(req)) return sendJson(res, 401, { ok: false, error: 'No autorizado' });
         if (req.method === 'POST' && pathname === '/cotizar') return await cotizar(req, res);
         if (req.method === 'GET' && pathname.startsWith('/pdf/')) return servirPdf(res, pathname.slice(5), searchParams.get('inline') === '1');
