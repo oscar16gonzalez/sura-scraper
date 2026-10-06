@@ -3,4 +3,3 @@ node_modules/
 .auth/
 assets/
 .DS_Store
-entrypoint.sh
