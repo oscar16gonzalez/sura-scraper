@@ -40,6 +40,8 @@ class SuraScraper {
         // Perfil persistente: conserva cookies/localStorage, incluida la marca de "recordar dispositivo"
         this.context = await chromium.launchPersistentContext(PROFILE_DIR, {
             headless: process.env.HEADLESS === 'true',
+            // En contenedores: sin sandbox de kernel y /dev/shm en /tmp (evita crashes de pestañas)
+            args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage', '--disable-gpu'],
             viewport: { width: 1280, height: 720 }
         });
         this.page = this.context.pages()[0] || await this.context.newPage();
@@ -48,7 +50,8 @@ class SuraScraper {
     async login(docType, username, password) {
         console.log('Iniciando proceso de autenticación...');
         // Redirige a login.sura.com/sso si no hay sesión activa
-        await this.page.goto(this.baseUrl, { waitUntil: 'load' });
+        // domcontentloaded: el portal SPA puede no disparar 'load' por recursos externos colgados
+        await this.page.goto(this.baseUrl, { waitUntil: 'domcontentloaded', timeout: 60000 });
         await this.page.locator('#dropdownMenuButton, #suraName').first().waitFor({ timeout: 30000 });
 
         if (isAppUrl(this.page.url())) {
