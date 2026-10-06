@@ -6,7 +6,8 @@ WORKDIR /app
 COPY package.json package-lock.json ./
 RUN npm ci --omit=dev
 
-COPY server.js scraper.js ./
+COPY server.js scraper.js entrypoint.sh ./
+RUN chmod +x entrypoint.sh
 
 # En contenedor siempre headless y escuchando en todas las interfaces
 ENV HEADLESS=true \
@@ -16,4 +17,4 @@ ENV HEADLESS=true \
 # Render inyecta PORT; si no existe, server.js usa 3000
 EXPOSE 3000
 
-CMD ["node", "server.js"]
+ENTRYPOINT ["./entrypoint.sh"]
